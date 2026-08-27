@@ -1,0 +1,50 @@
+# ---- Secrets & local config (NEVER commit) ----
+.env
+.env.*
+!.env.example
+config/user.toml
+config/secrets.toml
+
+# ---- Runtime data ----
+logs/
+data/
+*.db
+*.sqlite3
+audit/
+models/
+*.onnx
+*.gguf
+*.bin
+*.pt
+*.tflite
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.python-version
+
+# ---- Tooling caches ----
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# ---- Packaging (Phase 10) ----
+*.spec
+!bob.spec
+
+# ---- OS / editor ----
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+!.vscode/extensions.json
