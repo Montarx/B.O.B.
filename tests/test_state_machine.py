@@ -16,6 +16,7 @@ from bob.core.states import (
     TRANSITIONS,
     BobState,
     can_transition,
+    find_transition_path,
 )
 
 from .conftest import Recorder
@@ -109,3 +110,53 @@ async def test_history_is_recorded(bus: EventBus) -> None:
         BobState.STARTING,
         BobState.IDLE,
     ]
+
+
+# --------------------------------------------------------------------------
+# Transition path-finding (used by the developer state switcher)
+# --------------------------------------------------------------------------
+
+
+def test_path_to_the_current_state_is_empty() -> None:
+    assert find_transition_path(BobState.IDLE, BobState.IDLE) == []
+
+
+def test_direct_transition_is_a_single_step() -> None:
+    assert find_transition_path(BobState.IDLE, BobState.LISTENING) == [BobState.LISTENING]
+
+
+def test_every_state_is_reachable_from_every_other() -> None:
+    """The debug switcher must be able to jump anywhere, legally."""
+    for source in BobState:
+        for target in BobState:
+            path = find_transition_path(source, target)
+            assert path is not None, f"{source} cannot reach {target}"
+
+
+def test_returned_paths_are_legal() -> None:
+    """Every step of a found path must be permitted by the transition table."""
+    for source in BobState:
+        for target in BobState:
+            path = find_transition_path(source, target)
+            assert path is not None
+            current = source
+            for step in path:
+                assert can_transition(current, step), (
+                    f"illegal step {current} -> {step} in path {source} -> {target}"
+                )
+                current = step
+            assert current is target or path == []
+
+
+def test_paths_are_shortest() -> None:
+    """TRANSCRIBING is two hops from IDLE; the walk must not wander."""
+    assert len(find_transition_path(BobState.IDLE, BobState.TRANSCRIBING) or []) == 2
+
+
+async def test_walking_a_found_path_reaches_the_target(bus: EventBus) -> None:
+    sm = StateMachine(bus, initial=BobState.IDLE)
+    path = find_transition_path(BobState.IDLE, BobState.EXECUTING)
+    assert path is not None
+    for step in path:
+        await sm.transition(step, reason="debug")
+    assert sm.state is BobState.EXECUTING

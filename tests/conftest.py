@@ -19,6 +19,9 @@ from bob.core.events import Event
 from bob.providers import mock as _mock_providers  # noqa: F401 — registers mocks
 from bob.utils import paths
 
+# Qt must never try to open a real display during tests.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 
 @pytest.fixture(autouse=True)
 def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:

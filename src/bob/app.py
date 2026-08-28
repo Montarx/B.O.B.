@@ -1,18 +1,23 @@
-"""Application entry point (headless).
+"""Application entry points.
 
-Phase 0 has no window. Running ``python -m bob`` boots the kernel with mock
-providers, prints what it wired up, exercises a tool, and shuts down. It exists to
-prove the foundation works — Phase 1 replaces this with the Qt shell, which will
-boot the exact same kernel.
+``python -m bob``            launches the desktop shell
+``python -m bob --headless`` boots the kernel, runs a smoke check, exits
+``python -m bob --dev``      launches the shell with developer tooling enabled
+
+The headless path is kept because it is how the kernel is verified without a
+display, and it is what CI runs.
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import logging
+import sys
 
 from bob import __identity__, __version__
 from bob.config.loader import load_settings
+from bob.config.schema import Settings
 from bob.core.bus import EventBus
 from bob.core.events import Event
 from bob.core.kernel import Kernel
@@ -23,13 +28,43 @@ from bob.utils.logging import setup_logging
 _log = logging.getLogger("bob.app.main")
 
 
-async def run_headless() -> int:
-    """Boot the kernel, run a smoke check, shut down. Returns a process exit code."""
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="bob", description="B.O.B. — Beyond Orbit Buddy")
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="boot the kernel and run a smoke check without opening a window",
+    )
+    parser.add_argument(
+        "--dev",
+        action="store_true",
+        help="enable the developer state switcher (F12) and demo runner (F9)",
+    )
+    parser.add_argument(
+        "--demo",
+        action="store_true",
+        help="start the scripted demonstration scenario immediately",
+    )
+    parser.add_argument("--version", action="version", version=f"B.O.B. {__version__}")
+    return parser.parse_args(argv)
+
+
+def _prepare(argv: list[str] | None = None) -> tuple[argparse.Namespace, Settings]:
+    args = parse_args(argv)
     paths.ensure_dirs()
     settings = load_settings()
     setup_logging(settings.logging)
+    return args, settings
 
-    _log.info("%s v%s", __identity__, __version__)
+
+# ---------------------------------------------------------------------------
+# Headless
+# ---------------------------------------------------------------------------
+
+
+async def run_headless(settings: Settings) -> int:
+    """Boot the kernel, exercise the tool pipeline, shut down."""
+    _log.info("%s v%s (headless)", __identity__, __version__)
 
     bus = EventBus(name="bob")
     trace: list[str] = []
@@ -60,13 +95,48 @@ async def run_headless() -> int:
     return 0
 
 
-def main() -> int:
+# ---------------------------------------------------------------------------
+# Desktop
+# ---------------------------------------------------------------------------
+
+
+def run_desktop(settings: Settings, *, dev_tools: bool, demo: bool) -> int:
+    """Launch the Qt shell. Imported lazily so headless mode needs no Qt."""
+    try:
+        from bob.ui.app import BobApplication
+    except ImportError as exc:  # PySide6 not installed
+        print(f'B.O.B.\'s interface needs PySide6.\n  pip install -e ".[ui]"\n({exc})')
+        return 2
+
+    app = BobApplication(settings, dev_tools=dev_tools or demo)
+    if demo:
+        from PySide6.QtCore import QTimer
+
+        from bob.ui.intents import RunDemo
+
+        QTimer.singleShot(1200, lambda: app.window.emit_intent(RunDemo(True)))
+    return app.run()
+
+
+def main(argv: list[str] | None = None) -> int:
     """Console-script entry point."""
     try:
-        return asyncio.run(run_headless())
+        args, settings = _prepare(argv)
+    except Exception as exc:
+        print(f"B.O.B. failed to start: {exc}")
+        return 1
+
+    try:
+        if args.headless:
+            return asyncio.run(run_headless(settings))
+        return run_desktop(settings, dev_tools=args.dev, demo=args.demo)
     except KeyboardInterrupt:
         return 130
-    except Exception as exc:  # last-resort guard so the user sees a real message
+    except Exception as exc:
         logging.getLogger("bob.app").exception("fatal error")
         print(f"B.O.B. failed to start: {exc}")
         return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

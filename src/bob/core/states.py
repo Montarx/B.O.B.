@@ -6,6 +6,7 @@ here is a bug, and the state machine will say so instead of silently proceeding.
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Mapping
 from enum import StrEnum
 from types import MappingProxyType
@@ -83,3 +84,29 @@ STATUS_TEXT: Mapping[BobState, str] = MappingProxyType(
 def can_transition(current: BobState, target: BobState) -> bool:
     """Return whether ``current -> target`` is permitted."""
     return target in TRANSITIONS[current]
+
+
+def find_transition_path(current: BobState, target: BobState) -> list[BobState] | None:
+    """Shortest legal route from ``current`` to ``target``, excluding ``current``.
+
+    The developer state switcher uses this to jump anywhere without ever
+    performing an illegal transition: instead of forcing the state, it walks a
+    valid path. Returns ``None`` if the target is unreachable, and ``[]`` when
+    already there.
+    """
+    if current is target:
+        return []
+
+    queue: deque[tuple[BobState, list[BobState]]] = deque([(current, [])])
+    seen: set[BobState] = {current}
+    while queue:
+        node, path = queue.popleft()
+        for nxt in sorted(TRANSITIONS[node], key=lambda s: s.value):
+            if nxt in seen:
+                continue
+            route = [*path, nxt]
+            if nxt is target:
+                return route
+            seen.add(nxt)
+            queue.append((nxt, route))
+    return None

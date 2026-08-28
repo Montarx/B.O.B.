@@ -154,6 +154,96 @@ path of column [B], so it can never slow it down or break it.
 
 ---
 
+## 4a. The interface (Phase 1)
+
+### Visual identity: "Orrery"
+
+B.O.B. is *Beyond Orbit Buddy*, so the reference is an **armillary sphere** — an
+antique astronomical instrument — rendered matte and modern. This was chosen
+because it is specific to B.O.B.'s name and sits far away from the obvious
+references:
+
+| Not this | Its signature | What B.O.B. does instead |
+|---|---|---|
+| JARVIS / Iron Man HUD | dense circular gauges, heavy bloom, scan lines, angular brackets | few elements, matte surfaces, a strict glow budget, no scanlines |
+| LCARS | flat colour blocks, pill shapes | thin strokes on deep grounds |
+| Cyberpunk | glitch, chromatic aberration, yellow/magenta | none of it; one warm hue, reserved for EXECUTING |
+| Hacker terminal | monospace green on black, scrolling text | humanist sans for reading; mono **only** for numerals |
+
+The core's signature is a **mechanical iris**: six blades meeting at a hexagonal
+opening over a dark well. The light in the middle of B.O.B. is the *edge* where
+those blades meet, not a bloom filter — which is what keeps it from reading as
+"a glowing circle". The iris opens and closes with `aperture`, so OFFLINE is
+sealed shut and WAKE_DETECTED is wide open, and that single parameter carries
+state even for a user with reduced motion enabled.
+
+### The design system comes first
+
+`ui/theme/tokens.py` holds every colour, size, duration and easing name, and it
+imports no Qt. Two consequences worth keeping:
+
+* the whole design system is unit-testable, **including WCAG contrast ratios** —
+  accessibility is asserted, not assumed;
+* a test enforces that the generated stylesheet contains no hex colour outside
+  the palette, so ad-hoc styling fails CI rather than accumulating.
+
+Widgets are selected by dynamic property (`[role="panel"]`, `[type="caption"]`)
+rather than by class name, which survives Python subclassing and lets one widget
+class carry several appearances.
+
+### Rendering and the frame budget
+
+The core is a `QGraphicsView` over a scene sized to the core itself, so panels
+behind it never repaint. Five rules keep it cheap:
+
+1. **One timer** for the whole core. Layers do not own timers.
+2. `advance_phase()` returns whether a layer actually changed; only those are
+   invalidated.
+3. Layers with fixed geometry that merely rotate use `DeviceCoordinateCache`, so
+   spinning an orbit is a cached-pixmap transform, not a re-render.
+4. The timer **stops** when the widget is hidden or the window is minimised.
+5. OFFLINE drops to 8 fps; `reduced_motion` drops to 10 fps and stills the
+   moving layers.
+
+Measured on the offscreen software rasteriser with a full 440x440 repaint forced
+every frame — a deliberate worst case, since normal operation only repaints
+dirty regions:
+
+| State | p50 | p95 | Budget @60fps | Headroom |
+|---|---|---|---|---|
+| IDLE | 5.5 ms | 6.1 ms | 16.7 ms | 3.0× |
+| LISTENING | 6.9 ms | 8.3 ms | 16.7 ms | 2.4× |
+| THINKING | 5.7 ms | 6.8 ms | 16.7 ms | 2.9× |
+| EXECUTING | 5.4 ms | 6.0 ms | 16.7 ms | 3.1× |
+
+### Keeping logic out of widgets
+
+```
+kernel events ──▶ KernelBridge ──▶ ShellPresenter ──▶ ShellViewModel ──▶ widgets
+                      ▲                                                     │
+                      └───────────────── Intent ◀───────────────────────────┘
+```
+
+`ShellPresenter` is a pure reducer — events in, immutable snapshot out — with no
+Qt, no threads and no I/O, so streaming assembly, tool grouping and activity
+capping are all tested headlessly. Widgets render a snapshot and emit an
+**intent**; they have no reference to a model, a tool or a device, which makes
+"no business logic in widgets" structurally true rather than a review rule.
+
+High-frequency audio levels bypass the presenter and go straight to the core, so
+30 level events per second do not each trigger a full view-model diff.
+
+### Developer tooling
+
+The state switcher (F12) and demo runner (F9) exist only when B.O.B. is started
+with `--dev`. Notably, **the switcher does not force states**: it BFS-searches
+the transition table for a legal route and walks it, so Phase 0's "no illegal
+transition ever happens" invariant holds even in dev mode. The demo scenario
+drives the real kernel and publishes the same events the real pipeline will, so
+it exercises the actual code path rather than a special demo mode.
+
+---
+
 ## 5. Technology choices
 
 ### Decided now (Phase 0)
@@ -325,12 +415,12 @@ coexist on an 8 GB card.
 **Mitigation:** Ollama unloads idle models; vision loads on demand only. Document a
 tested profile per VRAM tier and let `user.toml` select it.
 
-### R8 — UI thread starvation · **Low, but expensive if ignored**
+### R8 — UI thread starvation · **Low — addressed in Phase 1**
 A 60 fps animated core leaves ~16 ms per frame. One synchronous call on the GUI
 thread is a visible stutter.
-**Mitigation:** the kernel/UI split makes this structurally hard to get wrong. It is
-enforceable in review: `src/bob/ui/` may import the kernel, and nothing in the
-kernel may import Qt.
+**Status:** the kernel/UI split is in place and enforced by a test; measured frame
+cost leaves 2.4–3.1× headroom (see §4a). The remaining exposure is a future
+widget doing synchronous work, which the intent/snapshot boundary makes hard.
 
 ---
 
@@ -343,3 +433,8 @@ kernel may import Qt.
 5. No new `is_*` state boolean. Add a state or a reason to the state machine.
 6. Personality changes go in `config/personas/`, never in Python.
 7. New settings go in `config/schema.py` with a default and a description.
+8. No widget defines a colour, size, duration or easing of its own — it comes
+   from the theme, or it becomes a new token.
+9. Widgets emit intents. A widget that calls the kernel directly is a bug.
+10. Do not name a method after one Qt already defines (`render`, `advance`);
+    shadowing Qt's API breaks callers in ways mypy is the only thing that catches.
