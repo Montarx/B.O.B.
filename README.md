@@ -6,10 +6,11 @@ B.O.B. hears you, talks back, controls your PC, remembers what you ask him to
 remember, and looks at your screen only when you tell him to. He runs on free,
 local software — no paid API is required for anything in the core.
 
-> **Status: Phase 1.** The foundation (Phase 0) and the desktop shell are in
-> place: design system, animated core, state-driven UI, developer tooling.
-> Every provider is still a mock — there is no microphone, no local model and no
-> PC control yet. Those are Phases 2–6.
+> **Status: Phase 2.** B.O.B. now listens. Microphone capture, Silero VAD,
+> speech segmentation and local Whisper transcription are in place, wired to the
+> UI. He does not answer yet — a transcript appears and he returns to idle.
+> The brain (Ollama), the voice (TTS), the wake word and PC control are Phases
+> 3–6.
 
 ![B.O.B. listening](docs/images/shell-listening.png)
 
@@ -63,14 +64,95 @@ python -m bob                # the desktop shell
 python -m bob --dev          # ...with the developer state switcher (F12)
 python -m bob --demo         # ...and start the scripted walkthrough immediately
 python -m bob --headless     # boot the kernel only, no window (what CI runs)
+
+python -m bob devices        # list microphones
+python -m bob fetch-models   # download the VAD and STT models
+python -m bob benchmark-stt  # compare Whisper models on your own recordings
 ```
 
 Run the tests:
 
 ```bash
-pytest                       # 251 tests; UI tests run offscreen, no display needed
+pytest                       # 433 tests; no microphone or model download needed
+pytest -m integration        # tests that DO need real hardware or models
 ruff check . && mypy         # lint and strict type check
 ```
+
+## Voice
+
+B.O.B. listens on demand. Press **Άκου με**, or **Ctrl+Space**, speak Greek, and
+stop — voice activity detection decides when you have finished.
+
+```
+IDLE ──▶ LISTENING ──▶ TRANSCRIBING ──▶ IDLE
+         core reacts     "Μεταγράφω…"    transcript in the conversation
+         to your voice
+```
+
+### First-time setup
+
+```bash
+pip install -e ".[ui,voice,dev]"
+
+python -m bob fetch-models            # Silero VAD (~2 MB) + your Whisper model
+python -m bob devices                 # find your microphone's name
+```
+
+Then, in `config/user.toml` (gitignored):
+
+```toml
+[audio]
+input_device = "Blue Yeti"   # a NAME or substring, never an index
+
+[stt]
+model = "large-v3-turbo"
+```
+
+**Use a name, not an index.** PortAudio device indices shift when you plug in a
+headset, and an index that silently starts recording from the wrong device is a
+miserable bug to diagnose.
+
+### Choosing a model
+
+The shipped default is **provisional**. Greek accuracy depends on your hardware,
+your microphone and your room, so measure it:
+
+```bash
+python -m bob benchmark-stt --samples ./samples
+```
+
+See **[docs/BENCHMARK.md](docs/BENCHMARK.md)** for how to record samples and read
+the results. (`distil-whisper` is not a candidate — it is English-only.)
+
+### Tuning what counts as speech
+
+```toml
+[vad]
+threshold      = 0.5    # Silero speech probability
+min_speech_ms  = 250    # ignores coughs and keyboard clicks
+end_silence_ms = 700    # raise if B.O.B. cuts you off mid-sentence
+pre_roll_ms    = 320    # raise if your first syllable goes missing
+```
+
+`pre_roll_ms` is the one worth understanding: VAD always decides slightly late, so
+B.O.B. keeps a rolling buffer of the audio *just before* detection and prepends it.
+Without it, "Άνοιξε" arrives as "νοιξε".
+
+### Privacy
+
+**Nothing is recorded.** Audio is processed in memory and discarded; the local
+Whisper path never leaves your machine. `audio.retain_recordings` exists only for
+building benchmark samples and defaults to `false`.
+
+### If it does not work
+
+| Symptom | Cause |
+|---|---|
+| "Χωρίς μικρόφωνο" | No input device, or PortAudio missing. Run `python -m bob devices`. |
+| Opens but hears nothing | Windows 11 microphone privacy. B.O.B. detects sustained digital silence and says so. |
+| "Run: python -m bob fetch-models" | Models not downloaded. B.O.B. starts anyway, without the microphone. |
+| CUDA errors on load | CTranslate2 needs matching cuDNN/cuBLAS DLLs. Set `stt.device = "cpu"` or install the cuDNN 9 runtime. |
+| Muffled, low quality | A Bluetooth headset switched to 8 kHz HFP when the mic opened. Use a wired mic or the laptop array. |
 
 ## The interface
 
@@ -106,6 +188,7 @@ decoration:
 | `Ctrl+K` | focus the input |
 | `Ctrl+L` | clear the conversation |
 | `F12` | developer state switcher (`--dev` only) |
+| `Ctrl+Space` | start/stop listening |
 | `F9` | start/stop the demo scenario (`--dev` only) |
 
 ### Accessibility
@@ -158,6 +241,7 @@ src/bob/
     config/        settings schema + layered loader
     providers/     Protocols, registry, and mock implementations
     tools/         tool base, registry/executor, permissions, audit, builtins
+    audio/         capture, VAD, segmentation, level metering
     ui/            the desktop shell
         theme/     design tokens, colour maths, stylesheet, fonts, easing
         widgets/   primitives, core layers, panels, chrome, conversation
@@ -175,10 +259,31 @@ it is why `python -m bob --headless` still works with PySide6 uninstalled.
 See `ARCHITECTURE.md` for how these communicate, and `ROADMAP.md` for what
 happens next.
 
+## Known limitations (Phase 2)
+
+Honest about what has and has not been verified:
+
+- **Greek accuracy is unmeasured.** The development environment has no audio
+  device, no GPU and no access to Hugging Face, so no model has actually run
+  against Greek speech here. The benchmark harness exists precisely so you can
+  measure it; the shipped default is marked provisional everywhere it appears.
+- **The Windows capture path is untested on Windows.** Device enumeration,
+  WASAPI selection, resampling and hot-unplug handling are implemented and unit
+  tested against a scripted backend, but no real microphone has been opened.
+- **Partial transcripts rarely fire.** faster-whisper finalises a short command
+  as a single segment, so `stt.emit_partials` usually produces one partial equal
+  to the final text. The interface exists for a genuinely streaming backend
+  later; B.O.B. does not fake streaming by chopping up a finished result.
+- **One utterance at a time.** Capture stops during transcription. Continuous
+  listening arrives with the wake word in Phase 5.
+- **No echo cancellation yet.** It is not needed until B.O.B. can speak
+  (Phase 4), which is when barge-in becomes real.
+
 ## Documentation
 
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — the design, the reasoning, and the risks
 - [`ROADMAP.md`](ROADMAP.md) — phases, scope and exit criteria
+- [`docs/BENCHMARK.md`](docs/BENCHMARK.md) — choosing a Whisper model for your machine
 
 ## Language
 

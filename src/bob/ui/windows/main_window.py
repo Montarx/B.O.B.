@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QKeySequence, QResizeEvent, QShortcut
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -21,13 +21,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from bob.ui.intents import Intent, RequestState, RunDemo, SubmitText
+from bob.ui.intents import Intent, RequestState, RunDemo, SubmitText, ToggleListening
 from bob.ui.responsive import ShellLayout, core_diameter, layout_for_width
 from bob.ui.theme.tokens import Theme
 from bob.ui.viewmodel import ShellViewModel
 from bob.ui.widgets.chrome import CaptionLine, InputBar, TitleBar
 from bob.ui.widgets.conversation import ConversationView
 from bob.ui.widgets.core_view import CoreView
+from bob.ui.widgets.microphone import MicrophoneButton
 from bob.ui.widgets.panels import (
     ActivityPanel,
     ProviderPanel,
@@ -129,6 +130,14 @@ class MainWindow(QWidget):
         self._caption = CaptionLine(theme)
         self._stage.body.addWidget(self._core, 1)
         self._stage.body.addWidget(self._caption)
+
+        # Live transcript, shown under the core while STT is decoding.
+        self._partial = Label("", theme, "body")
+        self._partial.set_tone("muted")
+        self._partial.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._partial.setWordWrap(True)
+        self._partial.hide()
+        self._stage.body.addWidget(self._partial)
         column.addWidget(self._stage, 3)
 
         conversation_panel = Panel(theme, "ΣΥΝΟΜΙΛΙΑ")
@@ -141,6 +150,14 @@ class MainWindow(QWidget):
         self._error.setWordWrap(True)
         self._error.hide()
         column.addWidget(self._error)
+
+        # The listen control sits with the input, because in Phase 2 those are
+        # the two ways to talk to B.O.B.
+        self._microphone = MicrophoneButton(theme)
+        self._microphone.toggled.connect(
+            lambda listening: self.intentRaised.emit(ToggleListening(listening))
+        )
+        column.addWidget(self._microphone)
 
         self._input = InputBar(theme)
         self._input.submitted.connect(lambda text: self.intentRaised.emit(SubmitText(text)))
@@ -168,6 +185,8 @@ class MainWindow(QWidget):
         QShortcut(QKeySequence("Ctrl+L"), self, self._clear_conversation)
         # Focus the input from anywhere, so B.O.B. is keyboard-first.
         QShortcut(QKeySequence("Ctrl+K"), self, lambda: self._input.setFocus())
+        # Push-to-listen until the wake word exists.
+        QShortcut(QKeySequence("Ctrl+Space"), self, self._toggle_listening)
 
     # -- rendering -------------------------------------------------------
 
@@ -188,6 +207,8 @@ class MainWindow(QWidget):
         self._system_panel.set_stats(vm.system)
         self._provider_panel.set_providers(vm.providers)
         self._input.set_enabled_state(vm.input_enabled)
+        self._microphone.render_state(vm.state, vm.microphone, can_listen=vm.can_listen)
+        self._partial.setVisible(bool(vm.partial_transcript))
         self._error.setVisible(bool(vm.error))
         if self._debug is not None:
             self._debug.set_state(vm.state)
@@ -217,6 +238,11 @@ class MainWindow(QWidget):
             self._provider_panel.set_providers(vm.providers)
         if vm.input_enabled != previous.input_enabled:
             self._input.set_enabled_state(vm.input_enabled)
+        if vm.microphone != previous.microphone or vm.state is not previous.state:
+            self._microphone.render_state(vm.state, vm.microphone, can_listen=vm.can_listen)
+        if vm.partial_transcript != previous.partial_transcript:
+            self._partial.setText(vm.partial_transcript)
+            self._partial.setVisible(bool(vm.partial_transcript))
         if vm.error != previous.error:
             self._error.setText(vm.error)
             self._error.setVisible(bool(vm.error))
@@ -266,6 +292,10 @@ class MainWindow(QWidget):
 
     def _toggle_demo(self) -> None:
         self.intentRaised.emit(RunDemo(not self._vm.demo_running))
+
+    def _toggle_listening(self) -> None:
+        if self._vm.can_listen or self._vm.microphone.listening:
+            self.intentRaised.emit(ToggleListening(not self._vm.microphone.listening))
 
     def _position_debug(self) -> None:
         if self._debug is None or not self._debug.isVisible():

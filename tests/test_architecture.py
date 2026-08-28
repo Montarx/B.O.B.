@@ -96,8 +96,9 @@ def test_headless_run_imports_no_qt() -> None:
     code = (
         "import sys, asyncio\n"
         "from bob.config.loader import load_settings\n"
-        "from bob.providers import mock\n"
+        "from bob.providers import load_all\n"
         "from bob.app import run_headless\n"
+        "load_all()\n"
         "asyncio.run(run_headless(load_settings()))\n"
         "loaded = [m for m in sys.modules if m.startswith('PySide6')]\n"
         "sys.exit(1 if loaded else 0)\n"

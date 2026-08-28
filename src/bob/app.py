@@ -14,6 +14,7 @@ import argparse
 import asyncio
 import logging
 import sys
+from pathlib import Path
 
 from bob import __identity__, __version__
 from bob.config.loader import load_settings
@@ -21,7 +22,7 @@ from bob.config.schema import Settings
 from bob.core.bus import EventBus
 from bob.core.events import Event
 from bob.core.kernel import Kernel
-from bob.providers import mock as _mock_providers  # noqa: F401 — registers mocks
+from bob.providers import load_all as _load_providers
 from bob.utils import paths
 from bob.utils.logging import setup_logging
 
@@ -30,6 +31,32 @@ _log = logging.getLogger("bob.app.main")
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="bob", description="B.O.B. — Beyond Orbit Buddy")
+    parser.add_argument(
+        "command",
+        nargs="?",
+        default="run",
+        choices=("run", "devices", "fetch-models", "benchmark-stt"),
+        help=(
+            "run: the desktop shell (default) · devices: list microphones · "
+            "fetch-models: download the VAD/STT models · "
+            "benchmark-stt: compare STT configurations"
+        ),
+    )
+    parser.add_argument(
+        "--samples",
+        type=Path,
+        help="benchmark-stt: directory of 16-bit mono .wav samples",
+    )
+    parser.add_argument(
+        "--models",
+        help="benchmark-stt / fetch-models: comma-separated model names",
+    )
+    parser.add_argument("--device", default="auto", help="benchmark-stt: auto | cpu | cuda")
+    parser.add_argument(
+        "--compute-type",
+        default="auto",
+        help="benchmark-stt: auto | int8 | int8_float16 | float16 | float32",
+    )
     parser.add_argument(
         "--headless",
         action="store_true",
@@ -54,6 +81,7 @@ def _prepare(argv: list[str] | None = None) -> tuple[argparse.Namespace, Setting
     paths.ensure_dirs()
     settings = load_settings()
     setup_logging(settings.logging)
+    _load_providers()
     return args, settings
 
 
@@ -118,6 +146,61 @@ def run_desktop(settings: Settings, *, dev_tools: bool, demo: bool) -> int:
     return app.run()
 
 
+def run_devices(settings: Settings) -> int:
+    """List microphones, so a name can be put in ``config/user.toml``."""
+    from bob.audio.capture import SoundDeviceBackend
+    from bob.audio.devices import AudioDeviceError, describe_devices, select_device
+
+    backend = SoundDeviceBackend()
+    try:
+        devices = backend.list_input_devices()
+    except AudioDeviceError as exc:
+        print(f"Could not enumerate microphones: {exc}")
+        return 1
+
+    print(describe_devices(devices))
+    chosen = select_device(devices, settings.audio.input_device)
+    if chosen is not None:
+        print(f"\nB.O.B. would use: {chosen.label}")
+    return 0
+
+
+def run_benchmark_cli(settings: Settings, args: argparse.Namespace) -> int:
+    """Compare STT configurations over the same Greek samples."""
+    from bob.dev.benchmark import DEFAULT_MODELS, format_report, run_benchmark
+
+    if not args.samples:
+        print(
+            "benchmark-stt needs samples:\n"
+            "  python -m bob benchmark-stt --samples ./samples\n\n"
+            "Put 16-bit mono .wav files there, each optionally beside a .txt\n"
+            "containing the correct transcript (used to compute WER)."
+        )
+        return 2
+
+    models = (
+        [m.strip() for m in args.models.split(",") if m.strip()]
+        if args.models
+        else list(DEFAULT_MODELS)
+    )
+    try:
+        reports = asyncio.run(
+            run_benchmark(
+                args.samples,
+                models,
+                device=args.device,
+                compute_type=args.compute_type,
+                language=settings.stt.language or "el",
+                beam_size=settings.stt.beam_size,
+            )
+        )
+    except FileNotFoundError as exc:
+        print(f"{exc}")
+        return 2
+    print(format_report(reports))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Console-script entry point."""
     try:
@@ -127,6 +210,19 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     try:
+        if args.command == "devices":
+            return run_devices(settings)
+        if args.command == "fetch-models":
+            from bob.dev.fetch import fetch_all
+
+            models = (
+                [m.strip() for m in args.models.split(",") if m.strip()]
+                if args.models
+                else [settings.stt.model]
+            )
+            return fetch_all(models)
+        if args.command == "benchmark-stt":
+            return run_benchmark_cli(settings, args)
         if args.headless:
             return asyncio.run(run_headless(settings))
         return run_desktop(settings, dev_tools=args.dev, demo=args.demo)

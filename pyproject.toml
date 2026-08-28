@@ -22,8 +22,15 @@ dependencies = [
 [project.optional-dependencies]
 # Phase 1 — desktop shell + sci-fi UI
 ui = ["PySide6>=6.7"]
-# Phase 2 — microphone + speech-to-text
-stt = ["sounddevice>=0.4.7", "numpy>=1.26", "faster-whisper>=1.0"]
+# Phase 2 — microphone, VAD and speech-to-text.
+# Grouped so a minimal install stays small: B.O.B. starts without these and
+# tells you the microphone is unavailable rather than refusing to launch.
+voice = [
+    "sounddevice>=0.5",      # PortAudio bindings; the wheel bundles PortAudio
+    "numpy>=1.26",
+    "onnxruntime>=1.18",     # runs Silero VAD without pulling in torch
+    "faster-whisper>=1.0",   # CTranslate2 Whisper; releases the GIL
+]
 # Phase 3 — local brain
 llm = ["httpx>=0.27"]
 # Phase 4/5 — speech output + wake word
@@ -41,6 +48,14 @@ dev = [
     "ruff>=0.5",
     "mypy>=1.10",
 ]
+# Everything, for development.
+all = [
+    "PySide6>=6.7",
+    "sounddevice>=0.5",
+    "numpy>=1.26",
+    "onnxruntime>=1.18",
+    "faster-whisper>=1.0",
+]
 
 [project.scripts]
 bob = "bob.__main__:main"
@@ -51,7 +66,10 @@ packages = ["src/bob"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-addopts = "-q --strict-markers"
+addopts = "-q --strict-markers -m 'not integration'"
+markers = [
+    "integration: needs real hardware or downloaded models; not run by default",
+]
 filterwarnings = ["error::DeprecationWarning:bob.*"]
 
 [tool.ruff]
@@ -68,6 +86,20 @@ ignore = [
     "RUF002",
     "RUF003",
 ]
+
+[[tool.mypy.overrides]]
+# These ship no stubs and no py.typed marker. Scoped deliberately rather than
+# using a global ignore_missing_imports, so a genuinely missing import in our
+# own code still fails.
+module = [
+    "sounddevice.*",
+    "onnxruntime.*",
+    "faster_whisper.*",
+    "ctranslate2.*",
+    "psutil.*",
+    "soundfile.*",
+]
+ignore_missing_imports = true
 
 [tool.mypy]
 plugins = ["pydantic.mypy"]

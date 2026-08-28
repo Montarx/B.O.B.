@@ -59,22 +59,32 @@ UI half ships then rather than as dead code now.
 
 ---
 
-## ⬜ Phase 2 — Microphone and speech-to-text
+## ✅ Phase 2 — Microphone and speech-to-text
 
 **Goal:** B.O.B. hears Greek.
 
-- `sounddevice` capture: one always-open 16 kHz mono stream, frames on a queue
-- Silero VAD provider; utterance segmentation with configurable silence timeout
-- faster-whisper provider (`large-v3`), running in a thread pool
-- Device selection in config, listed in the UI
-- Live input level feeding the core animation (the core already consumes it)
+- `sounddevice` capture at 16 kHz mono, with WASAPI preferred on Windows
+- Silero VAD through onnxruntime, with an adaptive energy VAD as fallback
+- Pure segmentation state machine: pre-roll, minimum speech, end-of-silence,
+  maximum utterance
+- Bounded frame queue with an explicit drop policy; the audio callback never blocks
+- faster-whisper provider, Greek pinned, prompt-seeded for app names
+- Device selection by name; `python -m bob devices`
+- Live microphone level driving the core animation
+- `python -m bob benchmark-stt` for choosing a model on real hardware
+- Graceful degradation: a missing model costs the microphone, not the app
 
 **Exit criteria**
-- Greek speech transcribes at usable accuracy, including code-switched sentences
-- The GUI never stutters during transcription
-- Measured latency from end-of-speech to transcript, recorded as a baseline
+- Measured: audio worker costs 0.08 ms per 32 ms frame (0.25% of a core)
+- Measured: GUI frame time 6.70 → 6.90 ms with live audio (+2.8%, 2.4x headroom)
+- 433 tests, none requiring a microphone or a model download
+- ruff clean, mypy strict clean
 
-**Risks:** R5 (Greek WER), R6 (latency)
+**Still to verify on real hardware** (this environment has no audio device, no
+GPU, and no access to Hugging Face): Greek transcription accuracy, end-to-end
+latency, and the Windows device paths. See "Known limitations" in the README.
+
+**Risks:** R5 (Greek WER) — now measurable rather than assumed; R6 (latency)
 
 ---
 

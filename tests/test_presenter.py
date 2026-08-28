@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 from bob.core.events import (
+    AudioDeviceErrorEvent,
     ConfirmationRequested,
     ErrorOccurred,
     Event,
     EventType,
+    MicrophoneClosed,
+    MicrophoneOpened,
     ResponseChunk,
     ResponseReady,
     StateChanged,
     ToolExecutionFinished,
     ToolExecutionStarted,
+    TranscriptionFailed,
+    TranscriptPartial,
     TranscriptReady,
 )
 from bob.core.states import BobState
@@ -264,3 +269,87 @@ def test_clear_conversation_resets_stream_state() -> None:
     assert p.view_model.conversation == ()
     p.handle(ResponseChunk(source="t", text="νέο"))
     assert len(p.view_model.conversation) == 1
+
+
+# --------------------------------------------------------------------------
+# Phase 2: audio and transcription events
+# --------------------------------------------------------------------------
+
+
+def test_microphone_opened_is_reflected() -> None:
+    p = ShellPresenter()
+    p.handle(MicrophoneOpened(source="audio", device="Blue Yeti (WASAPI)"))
+    assert p.view_model.microphone.listening
+    assert p.view_model.microphone.available
+    assert p.view_model.microphone.device == "Blue Yeti (WASAPI)"
+
+
+def test_microphone_closed_stops_listening_but_keeps_the_device() -> None:
+    p = ShellPresenter()
+    p.handle(MicrophoneOpened(source="audio", device="Blue Yeti"))
+    p.handle(MicrophoneClosed(source="audio", reason="user"))
+    assert not p.view_model.microphone.listening
+    assert p.view_model.microphone.device == "Blue Yeti"
+
+
+def test_audio_device_error_disables_the_microphone_and_explains() -> None:
+    p = ShellPresenter()
+    p.handle(AudioDeviceErrorEvent(source="audio", message="Windows refused access"))
+    assert not p.view_model.microphone.available
+    assert "refused" in p.view_model.microphone.error
+    assert p.view_model.conversation[-1].kind is EntryKind.ERROR
+
+
+def test_partial_transcript_is_shown_then_replaced() -> None:
+    """Requirement 10: show 'Άνοιξε το...' then the final result."""
+    p = ShellPresenter()
+    p.handle(TranscriptPartial(source="stt", text="Άνοιξε το..."))
+    assert p.view_model.partial_transcript == "Άνοιξε το..."
+
+    p.handle(TranscriptReady(source="stt", text="Άνοιξε το Spotify"))
+    assert p.view_model.partial_transcript == ""
+    assert p.view_model.conversation[-1].text == "Άνοιξε το Spotify"
+
+
+def test_a_partial_does_not_create_a_conversation_entry() -> None:
+    p = ShellPresenter()
+    p.handle(TranscriptPartial(source="stt", text="Άνοιξε"))
+    assert p.view_model.conversation == ()
+
+
+def test_transcription_failure_surfaces_and_clears_the_partial() -> None:
+    p = ShellPresenter()
+    p.handle(TranscriptPartial(source="stt", text="Άνοι"))
+    p.handle(TranscriptionFailed(source="stt", message="model unavailable"))
+    assert p.view_model.partial_transcript == ""
+    assert "model unavailable" in p.view_model.error
+    assert p.view_model.conversation[-1].kind is EntryKind.ERROR
+
+
+def test_transcript_arrives_as_a_user_message() -> None:
+    """Phase 2 stops here: a transcript, and no AI reply."""
+    p = ShellPresenter()
+    to_state(p, BobState.IDLE)
+    p.handle(TranscriptReady(source="stt", text="Τι τρώει όλη τη RAM;"))
+    entry = p.view_model.conversation[-1]
+    assert entry.speaker is Speaker.USER
+    assert entry.text == "Τι τρώει όλη τη RAM;"
+
+
+def test_can_listen_only_from_idle_or_while_listening() -> None:
+    p = ShellPresenter()
+    to_state(p, BobState.IDLE)
+    assert p.view_model.can_listen
+    to_state(p, BobState.LISTENING)
+    assert p.view_model.can_listen
+    to_state(p, BobState.TRANSCRIBING)
+    assert not p.view_model.can_listen
+
+
+def test_transcribing_shows_the_greek_caption() -> None:
+    p = ShellPresenter()
+    to_state(p, BobState.IDLE)
+    to_state(p, BobState.LISTENING)
+    assert p.view_model.caption == "Σε ακούω..."
+    to_state(p, BobState.TRANSCRIBING)
+    assert p.view_model.caption == "Κατάλαβα, ένα λεπτό..."

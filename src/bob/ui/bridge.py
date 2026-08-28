@@ -33,6 +33,7 @@ from bob.ui.intents import (
     RequestState,
     RunDemo,
     SubmitText,
+    ToggleListening,
 )
 from bob.ui.runtime import KernelRuntime
 
@@ -81,6 +82,8 @@ class KernelBridge(QObject):
             case ConfirmAction():
                 # Wired to PermissionBroker in Phase 6, when real tools exist.
                 _log.debug("confirmation intent ignored in Phase 1")
+            case ToggleListening(listening=listening):
+                self._runtime.call_soon(self._toggle_listening(listening))
             case CancelCurrent():
                 self._runtime.call_soon(self._goto_state(BobState.IDLE))
 
@@ -90,6 +93,27 @@ class KernelBridge(QObject):
         Phase 3 replaces this with a real turn through the orchestrator.
         """
         await self._runtime.bus.publish(TranscriptReady(source="ui", text=text, language="el"))
+
+    async def _toggle_listening(self, listening: bool) -> None:
+        """Open or close the microphone via the kernel's pipeline."""
+        pipeline = self._runtime.kernel.listening
+        if pipeline is None:
+            from bob.core.events import AudioDeviceErrorEvent
+
+            await self._runtime.bus.publish(
+                AudioDeviceErrorEvent(
+                    source="ui",
+                    message=(
+                        "Audio capture is unavailable. Install the voice extra: "
+                        'pip install -e ".[voice]"'
+                    ),
+                )
+            )
+            return
+        if listening:
+            await pipeline.start_listening()
+        else:
+            await pipeline.stop_listening(reason="user stopped")
 
     async def _goto_state(self, target: BobState) -> None:
         """Walk a *legal* path to ``target``.

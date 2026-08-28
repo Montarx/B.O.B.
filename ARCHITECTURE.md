@@ -244,6 +244,105 @@ it exercises the actual code path rather than a special demo mode.
 
 ---
 
+## 4b. The listening pipeline (Phase 2)
+
+### Threads, and what each may do
+
+```
+PortAudio callback thread (soft realtime)
+    downmix to mono, resample if needed, push to a bounded queue
+    ── never blocks, never runs inference, never allocates large buffers
+                                    │
+Audio worker thread (daemon)        ▼
+    VAD  →  Segmenter (pure)  →  LevelMeter (rate-limited)
+    on a complete utterance:  loop.call_soon_threadsafe(...)
+                                    │
+Kernel asyncio loop                 ▼
+    state machine, event bus
+    transcription via run_in_executor  →  STT worker thread
+                                    │
+Qt GUI thread                       ▼
+    unchanged: the Phase 1 bridge, presenter and widgets
+```
+
+**VAD does not run in the audio callback.** ONNX inference is not realtime-safe,
+and blocking PortAudio's thread produces audible glitches and can kill the stream
+outright on Windows. The callback therefore does three things only — downmix,
+resample, enqueue — and the worker thread does all the thinking.
+
+Measured cost of the worker path: **0.08 ms per 32 ms frame** (0.25% of one core)
+with the energy VAD; roughly 2% of a core with Silero. With the microphone closed
+there is no stream and no worker thread, so the cost is zero.
+
+The GUI is unaffected: core frame time goes from 6.70 ms to 6.90 ms with live
+audio flowing — a 2.8% regression, leaving 2.4x headroom against the 16.7 ms
+budget.
+
+### Backpressure is explicit
+
+The queue between the callback and the worker is bounded to two seconds of audio
+and **drops the oldest frame** when full rather than blocking the producer. Losing
+20 ms of stale audio is much better than stalling the audio device. Drops are
+counted, reported on the utterance, and preserved across listening sessions so
+the diagnostic is not silently reset.
+
+### Segmentation is a pure state machine
+
+```
+ARMED ──speech──▶ CANDIDATE ──sustained──▶ SPEECH ──silence──▶ TRAILING ──▶ utterance
+  ▲                    │                      ▲                    │
+  └──── too short ─────┘                      └──── speech ────────┘
+```
+
+`bob.audio.segmenter` has no I/O, no threads and no hardware, which is why
+pre-roll, minimum speech duration and the maximum-utterance cut are all covered by
+unit tests using synthetic patterns rather than recordings.
+
+Three behaviours worth naming:
+
+* **Pre-roll.** VAD is always slightly late, so by the time speech is confirmed
+  the first syllable has passed. The emitted utterance is
+  `pre-roll + candidate + speech`, which is what stops "Άνοιξε" arriving as
+  "νοιξε".
+* **CANDIDATE.** Speech must be sustained for `min_speech_ms` before it is
+  believed, so a cough or a keypress never reaches the STT model.
+* **TRAILING.** A mid-sentence pause is not the end of a sentence. Silence must
+  last `end_silence_ms` before the utterance closes, and the pause is kept inside
+  the audio rather than excised.
+
+### Provider choices, and why
+
+| Layer | Choice | Reasoning |
+|---|---|---|
+| Capture | `sounddevice` (PortAudio) | Bundles PortAudio in its wheel, is numpy-native, and gives us a callback thread we own. **Qt Multimedia was rejected deliberately**: it is already a dependency, but it would tie capture to the Qt event loop, breaking both "capture must not depend on UI responsiveness" and the kernel-must-not-import-Qt fence. |
+| VAD | Silero via **onnxruntime** | `webrtcvad` is fast but notoriously trigger-happy on desktop noise. Silero is ~1.8 MB and far more robust. Run through ONNX rather than torch, which would add over a gigabyte to run a 1.8 MB model; onnxruntime is also what Phase 5's wake word needs, so the dependency is shared. |
+| STT | faster-whisper (CTranslate2) | ~4x faster than reference Whisper at equal accuracy, int8 makes CPU viable, and critically it **releases the GIL**, so an executor thread genuinely parallelises. |
+
+Greek-specific decisions in the STT provider: the language is **pinned** to `el`
+rather than auto-detected (on a two-second utterance containing English app names,
+auto-detect picks English); an `initial_prompt` seeds the decoder with product
+names and technical English so "Spotify" does not come back as "Σποτιφάι"; and
+`condition_on_previous_text` is **off**, because it is a long-form feature that
+lets one bad transcript poison the next.
+
+### Degraded operation
+
+A missing Whisper model or an absent PortAudio costs you the microphone, **not the
+application**. `Kernel._start_providers` tolerates failures in optional providers,
+records them in `provider_errors`, publishes a non-fatal `ErrorOccurred`, and the
+UI reports "Χωρίς μικρόφωνο" with the reason. Requirement 14 is that B.O.B.
+recovers without a restart; refusing to launch because a model is missing is the
+opposite of that.
+
+### Privacy
+
+Audio never leaves the machine on the local path, and **nothing is written to
+disk**. `audio.retain_recordings` exists solely for building benchmark samples and
+defaults to `false`. There is no code path that persists microphone audio unless
+that flag is explicitly set.
+
+---
+
 ## 5. Technology choices
 
 ### Decided now (Phase 0)
@@ -396,12 +495,14 @@ them. Phase 3 adds a bounded repair loop (re-prompt with the validation error, t
 at most) plus a deterministic fast-path matcher for the dozen phrasings that
 actually get used daily — "άνοιξε X" should never require an LLM round trip.
 
-### R5 — Greek transcription accuracy · **Medium**
+### R5 — Greek transcription accuracy · **Medium — now measurable**
 Whisper's Greek WER is meaningfully higher than English, and it degrades further on
 code-switched speech ("άνοιξε το browser") — exactly how the user talks.
-**Mitigation:** `large-v3` only; supply an `initial_prompt` seeded with the app and
-technical vocabulary B.O.B. is expected to hear, which measurably improves proper
-nouns. Show the transcript in the UI so a misfire is visible before it is acted on.
+**Status:** the mitigations are implemented — `large-v3`-class models, a pinned
+language, and an `initial_prompt` seeded with app names and technical English. The
+choice of model is deliberately *not* made: `python -m bob benchmark-stt` measures
+Greek WER/CER on the user's own recordings and hardware (see `docs/BENCHMARK.md`).
+The default is marked provisional in both the schema and `default.toml`.
 
 ### R6 — Latency budget · **Medium**
 Wake → STT → LLM → TTS can easily total 4–6 seconds, which feels broken.

@@ -18,6 +18,7 @@ import logging
 from types import TracebackType
 from typing import Any
 
+from bob.audio.pipeline import ListeningPipeline
 from bob.config.loader import load_persona
 from bob.config.schema import Settings
 from bob.core.bus import EventBus
@@ -75,6 +76,12 @@ class Kernel:
         self.vision: VisionProvider | None = None
 
         self.persona: str = ""
+        #: Owns the microphone. Built in start(), once providers exist.
+        self.listening: ListeningPipeline | None = None
+        #: Providers that failed to start, by kind. B.O.B. runs degraded rather
+        #: than refusing to launch — a missing Whisper model should cost you the
+        #: microphone, not the application.
+        self.provider_errors: dict[str, str] = {}
         self._started = False
 
     # -- lifecycle -------------------------------------------------------
@@ -91,6 +98,7 @@ class Kernel:
             self._build_providers()
             await self._start_providers()
             self.tools.add_all(default_tools())
+            self._build_listening()
         except BobError as exc:
             _log.exception("startup failed")
             await self.bus.publish(
@@ -121,6 +129,11 @@ class Kernel:
             await self.bus.aclose()
             return
         await self.bus.publish(Event(type=EventType.KERNEL_STOPPING, source="kernel"))
+        if self.listening is not None:
+            try:
+                await self.listening.aclose()
+            except Exception:
+                _log.exception("error closing the listening pipeline")
         for provider in self._providers():
             try:
                 await provider.aclose()
@@ -156,24 +169,78 @@ class Kernel:
         self.memory = create("memory", s.memory.provider)
         self.vision = create("vision", s.vision.provider)
 
-    def _providers(self) -> list[Any]:
-        return [
-            p
-            for p in (
-                self.llm,
-                self.stt,
-                self.tts,
-                self.vad,
-                self.wakeword,
-                self.memory,
-                self.vision,
+    def _build_listening(self) -> None:
+        """Assemble the microphone pipeline.
+
+        Failure here is not fatal: B.O.B. is still useful without a microphone,
+        so a missing PortAudio or an unavailable device leaves ``listening`` as
+        ``None`` rather than preventing startup.
+        """
+        if self.vad is None or self.stt is None:
+            return
+        # No point opening a microphone we cannot transcribe from.
+        blocked = {"stt", "vad"} & self.provider_errors.keys()
+        if blocked:
+            _log.warning(
+                "microphone disabled: %s unavailable",
+                ", ".join(sorted(blocked)),
             )
-            if p is not None
-        ]
+            return
+        try:
+            from bob.audio.capture import SoundDeviceBackend
+
+            backend = SoundDeviceBackend()
+        except Exception:
+            _log.warning("audio capture unavailable; B.O.B. starts without a microphone")
+            return
+        self.listening = ListeningPipeline(
+            self.settings, self.bus, self.state, self.vad, self.stt, backend
+        )
+
+    def _provider_map(self) -> dict[str, Any]:
+        return {
+            kind: provider
+            for kind, provider in (
+                ("llm", self.llm),
+                ("stt", self.stt),
+                ("tts", self.tts),
+                ("vad", self.vad),
+                ("wakeword", self.wakeword),
+                ("memory", self.memory),
+                ("vision", self.vision),
+            )
+            if provider is not None
+        }
+
+    def _providers(self) -> list[Any]:
+        return list(self._provider_map().values())
+
+    #: Without these B.O.B. cannot start at all. Everything else degrades.
+    ESSENTIAL_PROVIDERS: tuple[str, ...] = ()
 
     async def _start_providers(self) -> None:
-        for provider in self._providers():
-            await provider.start()
+        """Start each provider, tolerating failures in the optional ones.
+
+        A provider that cannot start disables the feature that depends on it and
+        records why, so the UI can say "no microphone because the model is
+        missing" instead of the application failing to launch.
+        """
+        for kind, provider in self._provider_map().items():
+            try:
+                await provider.start()
+            except Exception as exc:
+                if kind in self.ESSENTIAL_PROVIDERS:
+                    raise
+                self.provider_errors[kind] = str(exc)
+                _log.warning("%s provider unavailable: %s", kind, exc)
+                await self.bus.publish(
+                    ErrorOccurred(
+                        source="kernel",
+                        component=f"provider.{kind}",
+                        message=str(exc),
+                        fatal=False,
+                    )
+                )
 
     # -- introspection ---------------------------------------------------
 
@@ -196,4 +263,5 @@ class Kernel:
                 "vision": getattr(self.vision, "name", None),
             },
             "tools": self.tools.names(),
+            "microphone": self.listening is not None,
         }

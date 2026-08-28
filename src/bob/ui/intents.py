@@ -47,4 +47,15 @@ class CancelCurrent:
     """Stop whatever B.O.B. is doing and return to idle."""
 
 
-Intent = SubmitText | RequestState | RunDemo | ConfirmAction | CancelCurrent
+@dataclass(frozen=True, slots=True)
+class ToggleListening:
+    """Start or stop the microphone.
+
+    Temporary infrastructure: until the wake word lands in Phase 5, this is how
+    listening is triggered. The pipeline underneath is the real one.
+    """
+
+    listening: bool = True
+
+
+Intent = SubmitText | RequestState | RunDemo | ConfirmAction | CancelCurrent | ToggleListening

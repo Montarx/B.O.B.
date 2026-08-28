@@ -108,6 +108,16 @@ class TaskInfo:
 
 
 @dataclass(frozen=True, slots=True)
+class MicrophoneInfo:
+    """What the UI shows about audio input."""
+
+    available: bool = False
+    listening: bool = False
+    device: str = ""
+    error: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class PendingConfirmation:
     """A HIGH/MEDIUM risk action waiting on the user."""
 
@@ -131,6 +141,9 @@ class ShellViewModel:
     system: SystemStats = field(default_factory=SystemStats)
     providers: ProviderInfo = field(default_factory=ProviderInfo)
     confirmation: PendingConfirmation | None = None
+    microphone: MicrophoneInfo = field(default_factory=MicrophoneInfo)
+    #: Live transcript being decoded; replaced by the final one.
+    partial_transcript: str = ""
     error: str = ""
     demo_running: bool = False
     #: True while the kernel is reachable; the shell greys out input otherwise.
@@ -144,3 +157,8 @@ class ShellViewModel:
             BobState.LISTENING,
             BobState.SPEAKING,
         }
+
+    @property
+    def can_listen(self) -> bool:
+        """The microphone control is usable only from IDLE or while listening."""
+        return self.connected and self.state in {BobState.IDLE, BobState.LISTENING}

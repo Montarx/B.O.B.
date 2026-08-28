@@ -16,15 +16,20 @@ from collections.abc import Callable
 from dataclasses import replace
 
 from bob.core.events import (
+    AudioDeviceErrorEvent,
     ConfirmationRequested,
     ErrorOccurred,
     Event,
     EventType,
+    MicrophoneClosed,
+    MicrophoneOpened,
     ResponseChunk,
     ResponseReady,
     StateChanged,
     ToolExecutionFinished,
     ToolExecutionStarted,
+    TranscriptionFailed,
+    TranscriptPartial,
     TranscriptReady,
 )
 from bob.core.states import STATUS_TEXT, BobState
@@ -33,6 +38,7 @@ from bob.ui.viewmodel import (
     ActionRecord,
     ConversationEntry,
     EntryKind,
+    MicrophoneInfo,
     PendingConfirmation,
     ProviderInfo,
     ShellViewModel,
@@ -79,6 +85,16 @@ class ShellPresenter:
                 self._on_state(event)
             case TranscriptReady():
                 self._on_transcript(event)
+            case TranscriptPartial():
+                self._on_partial(event)
+            case TranscriptionFailed():
+                self._on_transcription_failed(event)
+            case MicrophoneOpened():
+                self._on_microphone_opened(event)
+            case MicrophoneClosed():
+                self._on_microphone_closed(event)
+            case AudioDeviceErrorEvent():
+                self._on_audio_error(event)
             case ResponseChunk():
                 self._on_chunk(event)
             case ResponseReady():
@@ -115,7 +131,51 @@ class ShellPresenter:
             self._vm = replace(self._vm, task=TaskInfo())
             self._finish_streaming()
 
+    def _on_partial(self, event: TranscriptPartial) -> None:
+        """Show a live transcript; the final one replaces it."""
+        self._vm = replace(self._vm, partial_transcript=event.text)
+
+    def _on_transcription_failed(self, event: TranscriptionFailed) -> None:
+        self._vm = replace(self._vm, partial_transcript="", error=event.message)
+        self._append(
+            ConversationEntry(
+                id=uuid.uuid4().hex[:8],
+                speaker=Speaker.SYSTEM,
+                kind=EntryKind.ERROR,
+                text=event.message,
+            )
+        )
+
+    def _on_microphone_opened(self, event: MicrophoneOpened) -> None:
+        self._vm = replace(
+            self._vm,
+            microphone=MicrophoneInfo(available=True, listening=True, device=event.device),
+        )
+
+    def _on_microphone_closed(self, event: MicrophoneClosed) -> None:
+        self._vm = replace(
+            self._vm,
+            microphone=replace(self._vm.microphone, listening=False),
+        )
+
+    def _on_audio_error(self, event: AudioDeviceErrorEvent) -> None:
+        self._vm = replace(
+            self._vm,
+            microphone=MicrophoneInfo(available=False, listening=False, error=event.message),
+            error=event.message,
+        )
+        self._append(
+            ConversationEntry(
+                id=uuid.uuid4().hex[:8],
+                speaker=Speaker.SYSTEM,
+                kind=EntryKind.ERROR,
+                text=event.message,
+            )
+        )
+
     def _on_transcript(self, event: TranscriptReady) -> None:
+        # The final transcript supersedes any partial being shown.
+        self._vm = replace(self._vm, partial_transcript="")
         if not event.text.strip():
             return
         self._append(

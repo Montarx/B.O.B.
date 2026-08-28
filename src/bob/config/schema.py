@@ -16,7 +16,18 @@ RiskName = Literal["low", "medium", "high"]
 PolicyName = Literal["allow", "confirm", "deny"]
 
 
-class AppSettings(BaseModel):
+class Section(BaseModel):
+    """Base for every settings section.
+
+    ``extra="forbid"`` matters more than it looks: without it a typo such as
+    ``pre_role_ms`` in ``user.toml`` is silently ignored, and the user spends an
+    evening wondering why their setting does nothing.
+    """
+
+    model_config = {"extra": "forbid"}
+
+
+class AppSettings(Section):
     name: str = "B.O.B."
     tagline: str = "Beyond Orbit Buddy"
     language: str = Field("el", description="Primary spoken language (ISO 639-1).")
@@ -24,7 +35,7 @@ class AppSettings(BaseModel):
     autostart_with_windows: bool = False
 
 
-class LoggingSettings(BaseModel):
+class LoggingSettings(Section):
     level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     console: bool = True
     json_files: bool = Field(True, description="Write log files as JSON lines for machine parsing.")
@@ -32,26 +43,71 @@ class LoggingSettings(BaseModel):
     backup_count: int = 3
 
 
-class AudioSettings(BaseModel):
-    input_device: str | None = Field(None, description="None = system default.")
+class AudioSettings(Section):
+    input_device: str | None = Field(
+        None,
+        description=(
+            "Microphone NAME, or a substring of one. None = system default. "
+            "Never an index: PortAudio indices shift when hardware is plugged in."
+        ),
+    )
     output_device: str | None = None
-    sample_rate: int = 16_000
-    frame_ms: int = Field(20, description="Frame size fed to VAD / wake word.")
-    channels: int = 1
+    sample_rate: int = Field(
+        16_000, description="Internal rate. Whisper and Silero both want 16 kHz."
+    )
+    frame_ms: float = Field(
+        32.0,
+        gt=0,
+        le=100,
+        description="Frame size fed to VAD. 32 ms = Silero's native 512 samples.",
+    )
+    channels: int = Field(1, ge=1, le=2, description="Captured, then downmixed to mono.")
+    level_update_hz: float = Field(
+        20.0, gt=0, le=120, description="Rate limit for level updates sent to the UI."
+    )
+    error_recovery_s: float = Field(
+        2.5,
+        ge=0,
+        description="How long ERROR is shown before B.O.B. returns to IDLE.",
+    )
+    retain_recordings: bool = Field(
+        False,
+        description=(
+            "Keep captured audio on disk. OFF by default and intended only for "
+            "building benchmark samples — B.O.B. does not record you."
+        ),
+    )
+    recordings_dir: str | None = Field(
+        None,
+        description="Where retained recordings go. Ignored unless retain_recordings.",
+    )
     allow_barge_in: bool = Field(True, description="Let the user interrupt B.O.B. mid-sentence.")
     barge_in_threshold_ms: int = Field(
         250, description="Sustained speech needed before interrupting playback."
     )
 
 
-class VADSettings(BaseModel):
-    provider: str = "mock"
-    aggressiveness: int = Field(2, ge=0, le=3)
-    silence_timeout_ms: int = Field(800, description="Silence that ends an utterance.")
-    max_utterance_s: float = 20.0
+class VADSettings(Section):
+    provider: str = Field("silero", description="silero | energy | mock")
+    threshold: float = Field(
+        0.5, ge=0.0, le=1.0, description="Silero speech probability threshold."
+    )
+    min_speech_ms: int = Field(
+        250, ge=0, description="Sustained speech before an utterance is believed."
+    )
+    end_silence_ms: int = Field(700, ge=50, description="Silence that ends an utterance.")
+    pre_roll_ms: int = Field(
+        320,
+        ge=0,
+        le=2000,
+        description="Audio kept from before detection, so the first syllable survives.",
+    )
+    max_utterance_s: float = Field(
+        20.0, gt=0, description="Hard ceiling; longer speech is cut and flagged."
+    )
 
 
-class WakeWordSettings(BaseModel):
+class WakeWordSettings(Section):
     provider: str = "mock"
     enabled: bool = True
     keywords: list[str] = Field(default_factory=lambda: ["bob", "μπομπ"])
@@ -59,23 +115,50 @@ class WakeWordSettings(BaseModel):
     cooldown_ms: int = 1500
 
 
-class STTSettings(BaseModel):
-    provider: str = "mock"
-    model: str = "large-v3"
-    language: str | None = Field("el", description="None = auto-detect.")
-    compute_type: str = "int8"
+class STTSettings(Section):
+    provider: str = Field("faster-whisper", description="faster-whisper | mock")
+    model: str = Field(
+        "large-v3-turbo",
+        description=(
+            "Provisional. Run 'python -m bob benchmark-stt' on your own machine "
+            "and set this from the results — see docs/BENCHMARK.md."
+        ),
+    )
+    language: str | None = Field(
+        "el",
+        description=(
+            "Pinned rather than auto-detected: on short Greek utterances "
+            "containing English app names, auto-detect picks English."
+        ),
+    )
+    compute_type: str = Field("auto", description="auto | int8 | int8_float16 | float16 | float32")
     device: Literal["auto", "cpu", "cuda"] = "auto"
-    beam_size: int = 5
+    beam_size: int = Field(5, ge=1, le=10)
+    emit_partials: bool = Field(
+        False,
+        description=(
+            "Publish intermediate transcripts where the backend genuinely "
+            "decodes incrementally. Whisper usually returns short commands as a "
+            "single segment, so this rarely fires."
+        ),
+    )
+    initial_prompt: str | None = Field(
+        None,
+        description=(
+            "Vocabulary hint for the decoder. None uses B.O.B.'s Greek default, "
+            "which seeds app names and technical English."
+        ),
+    )
 
 
-class TTSSettings(BaseModel):
+class TTSSettings(Section):
     provider: str = "mock"
     voice: str = "el_GR-default"
     speed: float = Field(1.0, gt=0.1, le=3.0)
     volume: float = Field(1.0, ge=0.0, le=1.0)
 
 
-class LLMSettings(BaseModel):
+class LLMSettings(Section):
     provider: str = "mock"
     model: str = "qwen2.5:14b-instruct"
     host: str = "http://localhost:11434"
@@ -86,7 +169,7 @@ class LLMSettings(BaseModel):
     stream: bool = True
 
 
-class VisionSettings(BaseModel):
+class VisionSettings(Section):
     provider: str = "mock"
     model: str = "qwen2.5vl:7b"
     enabled: bool = Field(True, description="Screenshots are taken only on explicit request.")
@@ -96,7 +179,7 @@ class VisionSettings(BaseModel):
     )
 
 
-class MemorySettings(BaseModel):
+class MemorySettings(Section):
     provider: str = "mock"
     short_term_turns: int = Field(20, description="Conversation turns kept in the working context.")
     long_term_enabled: bool = True
@@ -107,7 +190,7 @@ class MemorySettings(BaseModel):
     max_recall_items: int = 8
 
 
-class PersonalitySettings(BaseModel):
+class PersonalitySettings(Section):
     persona: str = Field("bob", description="File stem under config/personas/.")
     humor: float = Field(0.4, ge=0.0, le=1.0)
     formality: float = Field(0.2, ge=0.0, le=1.0)
@@ -119,7 +202,7 @@ def _default_policy() -> dict[RiskName, PolicyName]:
     return {"low": "allow", "medium": "confirm", "high": "confirm"}
 
 
-class SecuritySettings(BaseModel):
+class SecuritySettings(Section):
     """How much B.O.B. is allowed to do without asking."""
 
     policy: dict[RiskName, PolicyName] = Field(default_factory=_default_policy)
@@ -145,7 +228,7 @@ class SecuritySettings(BaseModel):
         return value
 
 
-class UISettings(BaseModel):
+class UISettings(Section):
     theme: str = "orbit-dark"
     accent: str = "#4FD9E8"
     show_system_panel: bool = True

@@ -20,9 +20,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
+from bob.core.events import StateChanged, TranscriptReady
 from bob.core.states import STATUS_TEXT, BobState
 from bob.ui.captions import caption_for
-from bob.ui.intents import RequestState, RunDemo, SubmitText
+from bob.ui.intents import RequestState, RunDemo, SubmitText, ToggleListening
 from bob.ui.responsive import layout_for_width
 from bob.ui.theme.easing import ease
 from bob.ui.theme.stylesheet import build_stylesheet
@@ -31,6 +32,7 @@ from bob.ui.viewmodel import (
     ActionRecord,
     ConversationEntry,
     EntryKind,
+    MicrophoneInfo,
     ShellViewModel,
     Speaker,
     SystemStats,
@@ -341,3 +343,125 @@ def test_layout_spec_matches_the_window_width(qt_app: QApplication) -> None:
     window.resize(1920, 1080)
     window.show()
     assert window._layout_spec == layout_for_width(window.width())
+
+
+# --------------------------------------------------------------------------
+# Phase 2: the listen control and transcript display
+# --------------------------------------------------------------------------
+
+
+def test_microphone_button_offers_to_listen_when_idle(qt_app: QApplication) -> None:
+    window = MainWindow(DEFAULT_THEME)
+    window.render_view_model(
+        vm_for(BobState.IDLE, microphone=MicrophoneInfo(available=True, device="Mic"))
+    )
+    assert window._microphone._button.isEnabled()
+    assert "Άκου" in window._microphone._button.text()
+
+
+def test_microphone_button_offers_to_stop_while_listening(qt_app: QApplication) -> None:
+    window = MainWindow(DEFAULT_THEME)
+    window.render_view_model(
+        vm_for(
+            BobState.LISTENING,
+            microphone=MicrophoneInfo(available=True, listening=True, device="Mic"),
+        )
+    )
+    assert "Σταμάτα" in window._microphone._button.text()
+
+
+def test_microphone_button_is_disabled_while_transcribing(qt_app: QApplication) -> None:
+    """Requirement 8: no listening flow running in parallel with transcription."""
+    window = MainWindow(DEFAULT_THEME)
+    window.render_view_model(
+        vm_for(BobState.TRANSCRIBING, microphone=MicrophoneInfo(available=True))
+    )
+    assert not window._microphone._button.isEnabled()
+
+
+def test_microphone_button_reports_an_unavailable_device(qt_app: QApplication) -> None:
+    window = MainWindow(DEFAULT_THEME)
+    window.render_view_model(
+        vm_for(
+            BobState.IDLE,
+            microphone=MicrophoneInfo(available=False, error="Δεν βρέθηκε μικρόφωνο"),
+        )
+    )
+    assert not window._microphone._button.isEnabled()
+    assert "Χωρίς μικρόφωνο" in window._microphone._button.text()
+
+
+def test_microphone_button_raises_a_listening_intent(qt_app: QApplication) -> None:
+    window = MainWindow(DEFAULT_THEME)
+    window.render_view_model(vm_for(BobState.IDLE, microphone=MicrophoneInfo(available=True)))
+    seen: list[object] = []
+    window.intentRaised.connect(seen.append)
+    window._microphone._button.click()
+    assert seen == [ToggleListening(True)]
+
+
+def test_the_stop_intent_is_raised_while_listening(qt_app: QApplication) -> None:
+    window = MainWindow(DEFAULT_THEME)
+    window.render_view_model(
+        vm_for(
+            BobState.LISTENING,
+            microphone=MicrophoneInfo(available=True, listening=True),
+        )
+    )
+    seen: list[object] = []
+    window.intentRaised.connect(seen.append)
+    window._microphone._button.click()
+    assert seen == [ToggleListening(False)]
+
+
+def test_the_hotkey_toggles_listening(qt_app: QApplication) -> None:
+    window = MainWindow(DEFAULT_THEME)
+    window.render_view_model(vm_for(BobState.IDLE, microphone=MicrophoneInfo(available=True)))
+    seen: list[object] = []
+    window.intentRaised.connect(seen.append)
+    window._toggle_listening()
+    assert seen == [ToggleListening(True)]
+
+
+def test_the_hotkey_does_nothing_when_busy(qt_app: QApplication) -> None:
+    window = MainWindow(DEFAULT_THEME)
+    window.render_view_model(vm_for(BobState.THINKING))
+    seen: list[object] = []
+    window.intentRaised.connect(seen.append)
+    window._toggle_listening()
+    assert seen == []
+
+
+def test_partial_transcript_appears_and_is_replaced(qt_app: QApplication) -> None:
+    window = MainWindow(DEFAULT_THEME)
+    window.show()
+    window.render_view_model(vm_for(BobState.TRANSCRIBING, partial_transcript="Άνοιξε το..."))
+    assert window._partial.isVisibleTo(window)
+    assert window._partial.text() == "Άνοιξε το..."
+
+    window.render_view_model(vm_for(BobState.IDLE))
+    assert not window._partial.isVisibleTo(window)
+
+
+def test_a_transcript_reaches_the_conversation(qt_app: QApplication) -> None:
+    """The acceptance criterion, at the UI layer."""
+    from bob.ui.presenter import ShellPresenter
+
+    window = MainWindow(DEFAULT_THEME)
+    presenter = ShellPresenter(on_change=window.render_view_model)
+    presenter.handle(StateChanged(source="t", old="OFFLINE", new="STARTING"))
+    presenter.handle(StateChanged(source="t", old="STARTING", new="IDLE"))
+    presenter.handle(StateChanged(source="t", old="IDLE", new="LISTENING"))
+    presenter.handle(StateChanged(source="t", old="LISTENING", new="TRANSCRIBING"))
+    presenter.handle(TranscriptReady(source="stt", text="Άνοιξε το Spotify"))
+    presenter.handle(StateChanged(source="t", old="TRANSCRIBING", new="IDLE"))
+
+    assert window._conversation._rendered[-1].text == "Άνοιξε το Spotify"
+    assert window.core.state is BobState.IDLE
+
+
+def test_microphone_level_reaches_the_core(qt_app: QApplication) -> None:
+    """Requirement 12: normalised levels only, never samples."""
+    window = MainWindow(DEFAULT_THEME)
+    window.set_audio_level(0.62, "input")
+    assert window.core._level == pytest.approx(0.62)

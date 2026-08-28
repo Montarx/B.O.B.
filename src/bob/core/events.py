@@ -29,6 +29,9 @@ class EventType(StrEnum):
     STATE_CHANGED = "state.changed"
 
     # -- audio in --------------------------------------------------------
+    MICROPHONE_OPENED = "audio.microphone_opened"
+    MICROPHONE_CLOSED = "audio.microphone_closed"
+    AUDIO_DEVICE_ERROR = "audio.device_error"
     WAKE_WORD_DETECTED = "audio.wake_word_detected"
     SPEECH_STARTED = "audio.speech_started"
     SPEECH_ENDED = "audio.speech_ended"
@@ -36,7 +39,10 @@ class EventType(StrEnum):
     AUDIO_LEVEL = "audio.level"
 
     # -- understanding ---------------------------------------------------
+    TRANSCRIPTION_STARTED = "stt.transcription_started"
+    TRANSCRIPT_PARTIAL = "stt.transcript_partial"
     TRANSCRIPT_READY = "stt.transcript_ready"
+    TRANSCRIPTION_FAILED = "stt.transcription_failed"
     THINKING_STARTED = "brain.thinking_started"
     RESPONSE_CHUNK = "brain.response_chunk"
     RESPONSE_READY = "brain.response_ready"
@@ -91,6 +97,36 @@ class StateChanged(Event):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class MicrophoneOpened(Event):
+    """Capture started. ``device`` is what the user should see in the UI."""
+
+    type: EventType = EventType.MICROPHONE_OPENED
+    device: str = ""
+    sample_rate: int = 16_000
+
+    def describe(self) -> str:
+        return f"{self.device} @ {self.sample_rate} Hz"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class MicrophoneClosed(Event):
+    type: EventType = EventType.MICROPHONE_CLOSED
+    reason: str = ""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AudioDeviceErrorEvent(Event):
+    """The microphone is unavailable, gone, or silently delivering nothing."""
+
+    type: EventType = EventType.AUDIO_DEVICE_ERROR
+    message: str
+    recoverable: bool = True
+
+    def describe(self) -> str:
+        return self.message
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class WakeWordDetected(Event):
     type: EventType = EventType.WAKE_WORD_DETECTED
     keyword: str
@@ -127,6 +163,44 @@ class AudioLevel(Event):
 # --------------------------------------------------------------------------
 # Understanding
 # --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class TranscriptionStarted(Event):
+    """An utterance has been handed to the STT provider."""
+
+    type: EventType = EventType.TRANSCRIPTION_STARTED
+    duration_s: float = 0.0
+    model: str = ""
+
+    def describe(self) -> str:
+        return f"{self.duration_s:.1f}s via {self.model}"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class TranscriptPartial(Event):
+    """An intermediate transcript, superseded by the final one.
+
+    Only emitted by providers that genuinely decode incrementally; B.O.B. never
+    fabricates partials by chopping up a finished result.
+    """
+
+    type: EventType = EventType.TRANSCRIPT_PARTIAL
+    text: str
+    language: str = "el"
+
+    def describe(self) -> str:
+        return f"~ {self.text!r}"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class TranscriptionFailed(Event):
+    type: EventType = EventType.TRANSCRIPTION_FAILED
+    message: str
+    recoverable: bool = True
+
+    def describe(self) -> str:
+        return self.message
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

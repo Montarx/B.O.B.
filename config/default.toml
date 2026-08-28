@@ -30,11 +30,16 @@ max_tokens = 1024
 stream = true
 
 [stt]
-provider = "mock"        # -> "faster-whisper" in Phase 2
-model = "large-v3"
-language = "el"
-compute_type = "int8"
+provider = "faster-whisper"
+# PROVISIONAL. Do not treat this as a considered choice: run
+#   python -m bob benchmark-stt --samples <dir>
+# on your own machine and set this from the results. See docs/BENCHMARK.md.
+model = "large-v3-turbo"
+language = "el"          # pinned; auto-detect mishandles Greek + English app names
+compute_type = "auto"    # int8 on CPU, float16 on GPU
 device = "auto"
+beam_size = 5
+emit_partials = false
 
 [tts]
 provider = "mock"        # -> "piper" (or alternative) in Phase 4
@@ -43,9 +48,11 @@ speed = 1.0
 volume = 1.0
 
 [vad]
-provider = "mock"        # -> "silero" in Phase 2
-aggressiveness = 2
-silence_timeout_ms = 800
+provider = "silero"      # silero | energy (fallback, noisy) | mock
+threshold = 0.5
+min_speech_ms = 250      # ignores coughs, clicks and door slams
+end_silence_ms = 700     # long enough to survive a mid-sentence pause
+pre_roll_ms = 320        # keeps the first syllable when VAD triggers late
 max_utterance_s = 20.0
 
 [wakeword]
@@ -68,9 +75,16 @@ enabled = true
 max_edge_px = 1280
 
 [audio]
+# input_device = "Blue Yeti"   # a NAME or substring, never an index
 sample_rate = 16000
-frame_ms = 20
+frame_ms = 32.0          # 512 samples: Silero's native block size
 channels = 1
+level_update_hz = 20.0   # rate limit for the core animation
+error_recovery_s = 2.5
+
+# B.O.B. does not record you. This exists only for building benchmark samples.
+retain_recordings = false
+
 allow_barge_in = true
 barge_in_threshold_ms = 250
 
